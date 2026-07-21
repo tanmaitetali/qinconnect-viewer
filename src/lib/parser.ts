@@ -1,0 +1,670 @@
+import type {
+  RawLogEvent,
+  ParsedLogEvent,
+  LogEventType,
+  ParsedMessage,
+  ToolCall,
+  ToolResult,
+  TraceSpan,
+  SessionMetrics,
+  GuardrailEvent,
+  DetectedIssue,
+  DetectedIssueType,
+  SessionSummary,
+  SessionDetail,
+} from "./types";
+
+// ─── Parse Raw Log Event ─────────────────────────────────────────────────────
+
+export function parseLogEvent(raw: RawLogEvent): ParsedLogEvent | null {
+  if (!raw.message) return null;
+
+  try {
+    const data = JSON.parse(raw.message);
+    const eventType = detectEventType(data);
+    const contactId = extractContactId(data);
+    const sessionId = extractSessionId(data, raw.logStreamName);
+
+    return {
+      timestamp: raw.timestamp || 0,
+      eventType,
+      contactId,
+      sessionId,
+      data,
+      raw: raw.message,
+    };
+  } catch {
+    // Non-JSON log line — skip
+    return null;
+  }
+}
+
+function detectEventType(data: Record<string, unknown>): LogEventType {
+  // Q in Connect uses "event_type" field in CloudWatch logs
+  const type = (data.event_type as string) || (data.type as string) || "";
+  if (type === "TRANSCRIPT_ORCHESTRATION_MESSAGE") return "TRANSCRIPT_ORCHESTRATION_MESSAGE";
+  if (type === "TRANSCRIPT_AI_AGENT_TRACE") return "TRANSCRIPT_AI_AGENT_TRACE";
+  if (type === "TRANSCRIPT_AGENTIC_MESSAGE") return "TRANSCRIPT_AGENTIC_MESSAGE";
+  if (type === "TRANSCRIPT_LARGE_LANGUAGE_MODEL_INVOCATION") return "TRANSCRIPT_LARGE_LANGUAGE_MODEL_INVOCATION";
+  return "UNKNOWN";
+}
+
+function extractContactId(data: Record<string, unknown>): string {
+  return (
+    (data.contactId as string) ||
+    (data.ContactId as string) ||
+    (data.contact_id as string) ||
+    (data.contactArn as string)?.split("/").pop() ||
+    ""
+  );
+}
+
+function extractSessionId(
+  data: Record<string, unknown>,
+  logStreamName?: string
+): string {
+  // Q in Connect uses "session_id" as the primary session identifier
+  const sessionId =
+    (data.session_id as string) ||
+    (data.sessionId as string) ||
+    (data.SessionId as string) ||
+    "";
+
+  if (sessionId) return sessionId;
+
+  // Fall back to contact_id
+  const contactId =
+    (data.contact_id as string) ||
+    (data.contactId as string) ||
+    (data.ContactId as string) ||
+    "";
+  if (contactId) return contactId;
+
+  // Fall back to log stream name (often contains the contact ID)
+  if (logStreamName) {
+    const match = logStreamName.match(
+      /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i
+    );
+    if (match) return match[1];
+  }
+
+  return "unknown";
+}
+
+// ─── Parse Orchestration Messages ────────────────────────────────────────────
+
+export function parseOrchestrationMessage(
+  event: ParsedLogEvent
+): ParsedMessage[] {
+  const messages: ParsedMessage[] = [];
+  const data = event.data;
+  const iteration = (data.orchestration_iteration as number) || 0;
+  const participant = (data.participant as string) || "";
+  const guardrailBlocked = data.guardrail_blocked as boolean | undefined;
+
+  // Q in Connect format: top-level "values" field (may be JSON string or array)
+  let values: unknown[] = [];
+  if (data.values) {
+    if (typeof data.values === "string") {
+      try {
+        values = JSON.parse(data.values);
+      } catch {
+        values = [];
+      }
+    } else if (Array.isArray(data.values)) {
+      values = data.values;
+    }
+  }
+
+  if (values.length === 0) {
+    return messages;
+  }
+
+  for (const block of values) {
+    const b = block as Record<string, unknown>;
+
+    if (b.type === "text" && b.value) {
+      messages.push({
+        id: `${event.timestamp}-text-${messages.length}`,
+        timestamp: event.timestamp,
+        type: participant === "CUSTOMER" ? "customer" : "bot",
+        text: b.value as string,
+        orchestrationIteration: iteration,
+        raw: b,
+      });
+    } else if (b.type === "tool_use" && b.name) {
+      messages.push({
+        id: `${event.timestamp}-tool_use-${b.tool_use_id || messages.length}`,
+        timestamp: event.timestamp,
+        type: "tool_use",
+        text: `Tool: ${b.name}`,
+        toolName: b.name as string,
+        toolInput: b.arguments as Record<string, unknown> || b.input as Record<string, unknown> || {},
+        orchestrationIteration: iteration,
+        raw: b,
+      });
+    } else if (b.type === "tool_result") {
+      // tool_result has values array or error field
+      let resultContent: unknown = b.values || b.content || b.error || "";
+      if (Array.isArray(resultContent)) {
+        // Extract text values from the result
+        const texts = (resultContent as Record<string, unknown>[])
+          .filter((v) => v.type === "text")
+          .map((v) => v.value as string);
+        resultContent = texts.join("\n");
+      }
+
+      const toolResult = parseToolResult(resultContent || b.error);
+
+      // If there's an explicit error field, mark as failed
+      if (b.error) {
+        toolResult.success = false;
+        toolResult.error = b.error as string;
+      }
+
+      messages.push({
+        id: `${event.timestamp}-tool_result-${b.tool_use_id || messages.length}`,
+        timestamp: event.timestamp,
+        type: "tool_result",
+        text: toolResult.success
+          ? toolResult.isEmpty
+            ? "Tool result: empty"
+            : "Tool result: success"
+          : `Tool error: ${toolResult.error || "unknown"}`,
+        toolResult,
+        orchestrationIteration: iteration,
+        raw: b,
+      });
+    }
+  }
+
+  // Inject guardrail info if blocked
+  if (guardrailBlocked && messages.length > 0) {
+    messages[messages.length - 1].text += " [GUARDRAIL BLOCKED]";
+  }
+
+  return messages;
+}
+
+function parseToolResult(content: unknown): ToolResult {
+  if (!content) {
+    return { success: true, content: null, isEmpty: true };
+  }
+
+  // String content
+  if (typeof content === "string") {
+    try {
+      const parsed = JSON.parse(content);
+      // Check for empty KB results
+      if (parsed.results && Array.isArray(parsed.results) && parsed.results.length === 0) {
+        return { success: true, content: parsed, isEmpty: true };
+      }
+      // Check for error field
+      if (parsed.error) {
+        return { success: false, content: parsed, isEmpty: false, error: parsed.error };
+      }
+      return { success: true, content: parsed, isEmpty: false };
+    } catch {
+      // Check for error patterns in string
+      if (content.includes("error") || content.includes("Error")) {
+        return { success: false, content, isEmpty: false, error: content };
+      }
+      return { success: true, content, isEmpty: content.trim() === "" };
+    }
+  }
+
+  // Array content (from content blocks)
+  if (Array.isArray(content)) {
+    const textBlocks = content
+      .filter((c: unknown) => (c as Record<string, unknown>).type === "text")
+      .map((c: unknown) => (c as Record<string, unknown>).text as string);
+    const combined = textBlocks.join("\n");
+    return parseToolResult(combined);
+  }
+
+  // Object content
+  const obj = content as Record<string, unknown>;
+  if (obj.results && Array.isArray(obj.results) && (obj.results as unknown[]).length === 0) {
+    return { success: true, content: obj, isEmpty: true };
+  }
+  if (obj.error) {
+    return { success: false, content: obj, isEmpty: false, error: obj.error as string };
+  }
+
+  return { success: true, content: obj, isEmpty: false };
+}
+
+// ─── Parse Trace Spans ───────────────────────────────────────────────────────
+
+export function parseTraceSpan(event: ParsedLogEvent): TraceSpan | null {
+  const data = event.data;
+  let span: Record<string, unknown> = {};
+
+  // Q in Connect trace spans are typically a string with key=value pairs
+  const rawSpan = data.span as string | Record<string, unknown>;
+
+  if (typeof rawSpan === "string") {
+    // Parse key=value pairs from the span string like:
+    // "{span_id=xxx, usage_input_tokens=490, ...}"
+    const cleaned = rawSpan.replace(/^\{|\}$/g, "");
+    const pairs = cleaned.split(/,\s*/);
+    for (const pair of pairs) {
+      const eqIdx = pair.indexOf("=");
+      if (eqIdx > 0) {
+        const key = pair.substring(0, eqIdx).trim();
+        const value = pair.substring(eqIdx + 1).trim();
+        span[key] = value;
+      }
+    }
+  } else if (rawSpan && typeof rawSpan === "object") {
+    span = rawSpan;
+  } else {
+    // Try extracting from data directly
+    span = data;
+  }
+
+  const inputTokens = Number(span.usage_input_tokens || 0);
+  const outputTokens = Number(span.usage_output_tokens || 0);
+  const cacheReadInputTokens = Number(span.cache_read_input_tokens || 0);
+  const timeToFirstTokenMs = Number(span.time_to_first_token_ms || 0);
+  const modelId = String(span.request_model || span.model_id || "");
+
+  // Only return if we have meaningful metrics
+  if (inputTokens === 0 && outputTokens === 0 && timeToFirstTokenMs === 0) {
+    return null;
+  }
+
+  const startTs = Number(span.start_timestamp || 0);
+  const endTs = Number(span.end_timestamp || 0);
+  const durationMs = startTs && endTs ? endTs - startTs : undefined;
+
+  return {
+    id: `${event.timestamp}-trace-${span.span_id || ""}`,
+    timestamp: event.timestamp,
+    spanName: String(span.span_name || span.operation_name || "inference"),
+    inputTokens,
+    outputTokens,
+    cacheReadInputTokens,
+    timeToFirstTokenMs,
+    modelId: modelId || undefined,
+    durationMs,
+  };
+}
+
+// ─── Parse Guardrail Events ──────────────────────────────────────────────────
+
+export function parseGuardrailEvent(
+  event: ParsedLogEvent
+): GuardrailEvent | null {
+  const data = event.data;
+
+  // Guardrail info can appear in various fields
+  const guardrail =
+    (data.guardrail as Record<string, unknown>) ||
+    (data.guardrailResult as Record<string, unknown>) ||
+    null;
+
+  if (!guardrail && !data.guardrailAction) return null;
+
+  const scope = ((guardrail?.scope as string) || (data.scope as string) || "INPUT") as
+    | "INPUT"
+    | "OUTPUT";
+  const action = ((guardrail?.action as string) ||
+    (data.guardrailAction as string) ||
+    "NONE") as "NONE" | "BLOCKED" | "ANONYMIZED";
+
+  return {
+    id: `${event.timestamp}-guardrail`,
+    timestamp: event.timestamp,
+    guardrailId: (guardrail?.guardrailId as string) || (data.guardrailId as string) || "",
+    guardrailName: (guardrail?.name as string) || (data.guardrailName as string),
+    scope,
+    action,
+    matchedPolicies: (guardrail?.matchedPolicies as string[]) || [],
+    message: (guardrail?.message as string) || (data.guardrailMessage as string),
+  };
+}
+
+// ─── Extract Tool Calls ──────────────────────────────────────────────────────
+
+export function extractToolCalls(messages: ParsedMessage[]): ToolCall[] {
+  const toolCalls: ToolCall[] = [];
+  const pendingToolUses = new Map<string, ParsedMessage>();
+
+  for (const msg of messages) {
+    if (msg.type === "tool_use" && msg.toolName) {
+      pendingToolUses.set(msg.id, msg);
+      toolCalls.push({
+        id: msg.id,
+        timestamp: msg.timestamp,
+        name: msg.toolName,
+        input: msg.toolInput || {},
+        orchestrationIteration: msg.orchestrationIteration || 0,
+      });
+    }
+
+    if (msg.type === "tool_result" && msg.toolResult) {
+      // Match to the most recent pending tool use
+      const lastToolCall = toolCalls[toolCalls.length - 1];
+      if (lastToolCall && !lastToolCall.result) {
+        lastToolCall.result = msg.toolResult;
+        lastToolCall.durationMs = msg.timestamp - lastToolCall.timestamp;
+      }
+    }
+  }
+
+  return toolCalls;
+}
+
+// ─── Compute Metrics ─────────────────────────────────────────────────────────
+
+export function computeMetrics(spans: TraceSpan[]): SessionMetrics {
+  const totalInputTokens = spans.reduce((sum, s) => sum + s.inputTokens, 0);
+  const totalOutputTokens = spans.reduce((sum, s) => sum + s.outputTokens, 0);
+  const totalCacheReadTokens = spans.reduce(
+    (sum, s) => sum + s.cacheReadInputTokens,
+    0
+  );
+
+  const ttftValues = spans
+    .map((s) => s.timeToFirstTokenMs)
+    .filter((v) => v > 0);
+  const avgTimeToFirstToken =
+    ttftValues.length > 0
+      ? ttftValues.reduce((sum, v) => sum + v, 0) / ttftValues.length
+      : 0;
+  const maxTimeToFirstToken =
+    ttftValues.length > 0 ? Math.max(...ttftValues) : 0;
+
+  const cacheHitRatio =
+    totalInputTokens > 0
+      ? totalCacheReadTokens / (totalInputTokens + totalCacheReadTokens)
+      : 0;
+
+  // Count unique orchestration iterations from spans
+  const totalOrchestrationIterations = spans.length;
+
+  return {
+    totalInputTokens,
+    totalOutputTokens,
+    totalCacheReadTokens,
+    avgTimeToFirstToken,
+    maxTimeToFirstToken,
+    totalOrchestrationIterations,
+    cacheHitRatio,
+    spans,
+  };
+}
+
+// ─── Detect Issues ───────────────────────────────────────────────────────────
+
+export function detectIssues(
+  messages: ParsedMessage[],
+  toolCalls: ToolCall[],
+  guardrails: GuardrailEvent[]
+): DetectedIssue[] {
+  const issues: DetectedIssue[] = [];
+
+  // Issue: Empty KB results
+  for (const tc of toolCalls) {
+    if (tc.result?.isEmpty && tc.name.toLowerCase().includes("retrieve")) {
+      issues.push({
+        id: `issue-empty-kb-${tc.id}`,
+        type: "EMPTY_KB_RESULTS",
+        severity: "warning",
+        message: `Knowledge base returned empty results for "${tc.name}"`,
+        timestamp: tc.timestamp,
+        context: { toolName: tc.name, input: tc.input },
+        orchestrationIteration: tc.orchestrationIteration,
+      });
+    }
+  }
+
+  // Issue: Tool errors
+  for (const tc of toolCalls) {
+    if (tc.result && !tc.result.success) {
+      issues.push({
+        id: `issue-tool-error-${tc.id}`,
+        type: "TOOL_ERROR",
+        severity: "error",
+        message: `Tool "${tc.name}" returned error: ${tc.result.error || "unknown"}`,
+        timestamp: tc.timestamp,
+        context: { toolName: tc.name, error: tc.result.error },
+        orchestrationIteration: tc.orchestrationIteration,
+      });
+    }
+  }
+
+  // Issue: Missing required parameters
+  for (const msg of messages) {
+    if (
+      msg.type === "bot" &&
+      msg.text.includes("Missing required parameters")
+    ) {
+      issues.push({
+        id: `issue-missing-params-${msg.id}`,
+        type: "MISSING_REQUIRED_PARAMETERS",
+        severity: "error",
+        message: "Bot encountered missing required parameters error",
+        timestamp: msg.timestamp,
+        context: { text: msg.text },
+        orchestrationIteration: msg.orchestrationIteration,
+      });
+    }
+  }
+
+  // Issue: Guardrail blocks
+  for (const g of guardrails) {
+    if (g.action === "BLOCKED") {
+      issues.push({
+        id: `issue-guardrail-${g.id}`,
+        type: "GUARDRAIL_BLOCKED",
+        severity: "error",
+        message: `Guardrail blocked ${g.scope} — ${g.guardrailName || g.guardrailId}`,
+        timestamp: g.timestamp,
+        context: {
+          scope: g.scope,
+          guardrailId: g.guardrailId,
+          policies: g.matchedPolicies,
+        },
+      });
+    }
+  }
+
+  // Issue #8: text + tool_use in same orchestration iteration
+  const iterationContent = new Map<number, Set<string>>();
+  for (const msg of messages) {
+    const iter = msg.orchestrationIteration || 0;
+    if (iter === 0) continue;
+    if (!iterationContent.has(iter)) {
+      iterationContent.set(iter, new Set());
+    }
+    if (msg.type === "bot") iterationContent.get(iter)!.add("text");
+    if (msg.type === "tool_use") iterationContent.get(iter)!.add("tool_use");
+  }
+
+  iterationContent.forEach((types, iter) => {
+    if (types.has("text") && types.has("tool_use")) {
+      issues.push({
+        id: `issue-text-tooluse-iter-${iter}`,
+        type: "TEXT_AND_TOOL_USE_SAME_ITERATION",
+        severity: "warning",
+        message: `Issue #8: Text and tool_use in same orchestration iteration ${iter}`,
+        timestamp: messages.find((m) => m.orchestrationIteration === iter)?.timestamp || 0,
+        context: { iteration: iter },
+        orchestrationIteration: iter,
+      });
+    }
+  });
+
+  return issues;
+}
+
+// ─── Build Session Summary from Events ───────────────────────────────────────
+
+export function buildSessionSummaries(
+  events: ParsedLogEvent[]
+): SessionSummary[] {
+  // Group events by session ID
+  const sessionMap = new Map<string, ParsedLogEvent[]>();
+
+  for (const event of events) {
+    const sid = event.sessionId;
+    if (sid === "unknown") continue;
+    if (!sessionMap.has(sid)) sessionMap.set(sid, []);
+    sessionMap.get(sid)!.push(event);
+  }
+
+  const summaries: SessionSummary[] = [];
+
+  sessionMap.forEach((sessionEvents, sessionId) => {
+    const timestamps = sessionEvents.map((e) => e.timestamp).filter((t) => t > 0);
+    if (timestamps.length === 0) return;
+
+    const startTime = Math.min(...timestamps);
+    const endTime = Math.max(...timestamps);
+
+    // Count messages
+    let messageCount = 0;
+    let errorCount = 0;
+
+    for (const event of sessionEvents) {
+      if (event.eventType === "TRANSCRIPT_ORCHESTRATION_MESSAGE") {
+        messageCount++;
+      }
+      // Quick error scan
+      const raw = event.raw;
+      if (
+        raw.includes('"error"') ||
+        raw.includes("BLOCKED") ||
+        raw.includes('"results":[]')
+      ) {
+        errorCount++;
+      }
+    }
+
+    // Find a non-empty contact ID from any event in the session
+    let contactId = "";
+    let firstCustomerMessage = "";
+    for (const event of sessionEvents) {
+      if (event.contactId && !contactId) {
+        contactId = event.contactId;
+      }
+      // Try to extract first customer utterance for display
+      if (!firstCustomerMessage && event.eventType === "TRANSCRIPT_ORCHESTRATION_MESSAGE") {
+        const data = event.data;
+        const participant = (data.participant as string) || "";
+        if (participant === "CUSTOMER") {
+          // Extract text from values
+          let values: unknown[] = [];
+          if (data.values) {
+            if (typeof data.values === "string") {
+              try { values = JSON.parse(data.values); } catch { values = []; }
+            } else if (Array.isArray(data.values)) {
+              values = data.values;
+            }
+          }
+          for (const block of values) {
+            const b = block as Record<string, unknown>;
+            if (b.type === "text" && b.value) {
+              firstCustomerMessage = (b.value as string).slice(0, 80);
+              break;
+            }
+          }
+        }
+      }
+      if (contactId && firstCustomerMessage) break;
+    }
+
+    summaries.push({
+      sessionId,
+      contactId: contactId || sessionId,
+      startTime,
+      endTime,
+      duration: endTime - startTime,
+      messageCount,
+      hasErrors: errorCount > 0,
+      errorCount,
+      firstCustomerMessage: firstCustomerMessage || undefined,
+    });
+  });
+
+  // Sort by start time descending (most recent first)
+  summaries.sort((a, b) => b.startTime - a.startTime);
+  return summaries;
+}
+
+// ─── Build Full Session Detail ───────────────────────────────────────────────
+
+export function buildSessionDetail(events: ParsedLogEvent[]): SessionDetail {
+  const messages: ParsedMessage[] = [];
+  const spans: TraceSpan[] = [];
+  const guardrails: GuardrailEvent[] = [];
+
+  for (const event of events) {
+    switch (event.eventType) {
+      case "TRANSCRIPT_ORCHESTRATION_MESSAGE": {
+        const parsed = parseOrchestrationMessage(event);
+        messages.push(...parsed);
+        // Check for guardrail data in orchestration messages
+        const gr = parseGuardrailEvent(event);
+        if (gr) guardrails.push(gr);
+        break;
+      }
+      case "TRANSCRIPT_AI_AGENT_TRACE": {
+        const span = parseTraceSpan(event);
+        if (span) spans.push(span);
+        // Traces can also contain guardrail info
+        const grTrace = parseGuardrailEvent(event);
+        if (grTrace) guardrails.push(grTrace);
+        break;
+      }
+      case "TRANSCRIPT_AGENTIC_MESSAGE": {
+        // Full prompt/completion pairs — extract any messages
+        const agenticMessages = parseOrchestrationMessage(event);
+        messages.push(...agenticMessages);
+        break;
+      }
+      case "TRANSCRIPT_LARGE_LANGUAGE_MODEL_INVOCATION": {
+        // LLM call details — usually has span-like metrics
+        const llmSpan = parseTraceSpan(event);
+        if (llmSpan) spans.push(llmSpan);
+        break;
+      }
+    }
+  }
+
+  // Sort messages by timestamp
+  messages.sort((a, b) => a.timestamp - b.timestamp);
+
+  const toolCalls = extractToolCalls(messages);
+  const metrics = computeMetrics(spans);
+  const detectedIssues = detectIssues(messages, toolCalls, guardrails);
+
+  const timestamps = events.map((e) => e.timestamp).filter((t) => t > 0);
+  const startTime = timestamps.length > 0 ? Math.min(...timestamps) : 0;
+  const endTime = timestamps.length > 0 ? Math.max(...timestamps) : 0;
+
+  return {
+    sessionId: events[0]?.sessionId || "unknown",
+    contactId: events[0]?.contactId || "unknown",
+    startTime,
+    endTime,
+    messages,
+    toolCalls,
+    metrics,
+    guardrails,
+    detectedIssues,
+  };
+}
+
+// ─── Parse All Raw Events ────────────────────────────────────────────────────
+
+export function parseAllEvents(rawEvents: RawLogEvent[]): ParsedLogEvent[] {
+  const parsed: ParsedLogEvent[] = [];
+  for (const raw of rawEvents) {
+    const event = parseLogEvent(raw);
+    if (event) parsed.push(event);
+  }
+  return parsed;
+}
