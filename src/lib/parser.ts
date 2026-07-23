@@ -12,6 +12,7 @@ import type {
   DetectedIssueType,
   SessionSummary,
   SessionDetail,
+  SessionParameters,
 } from "./types";
 
 // ─── Parse Raw Log Event ─────────────────────────────────────────────────────
@@ -594,6 +595,203 @@ export function buildSessionSummaries(
   return summaries;
 }
 
+// ─── Extract Session Parameters ──────────────────────────────────────────────
+
+/**
+ * Extracts contact attributes / parameters set during the session.
+ * In Q in Connect, the AI agent "returns control" with parameters like
+ * lob_type, menu_results, intent, etc. These appear in:
+ * - Top-level fields in orchestration events
+ * - Tool call inputs (arguments the agent passes to tools)
+ * - Tool call results (JSON responses)
+ * - The raw event "data" object at any level
+ */
+export function extractSessionParameters(events: ParsedLogEvent[], toolCalls: ToolCall[]): SessionParameters {
+  const params: SessionParameters = {};
+
+  // Internal/noise keys to always skip
+  const SKIP_KEYS = new Set([
+    "type", "tool_use_id", "name", "id", "timestamp", "values",
+    "results", "content", "error", "success", "status_code",
+    "requestId", "request_id", "ResponseMetadata",
+    "$metadata", "httpStatusCode", "event_type", "session_id",
+    "contact_id", "contactId", "sessionId", "participant",
+    "orchestration_iteration", "guardrail_blocked", "model_id",
+    "span", "span_name", "span_id", "start_timestamp", "end_timestamp",
+    "usage_input_tokens", "usage_output_tokens", "usage_total_tokens",
+    "cache_read_input_tokens", "time_to_first_token_ms",
+    "response_finish_reasons", "request_model",
+    "completion", "system_prompt", "messages",
+    "contactArn", "ContactId", "SessionId",
+    // Generic noise from AWS SDK responses
+    "statusCode",
+  ]);
+
+  // Extract from ALL event data top-level fields
+  // In Q in Connect, contact attributes (lob_type, menu_results, etc.)
+  // can appear as top-level fields in orchestration events
+  for (const event of events) {
+    const data = event.data;
+
+    // Scan all top-level fields of the event for scalar parameter values
+    for (const [key, value] of Object.entries(data)) {
+      if (SKIP_KEYS.has(key)) continue;
+      if (value == null || value === "") continue;
+
+      if (typeof value === "string") {
+        const strVal = value;
+        if (strVal.length > 500) continue;
+        if (/^arn:aws:/.test(strVal)) continue;
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(strVal)) continue;
+
+        // If string looks like JSON, parse it and extract inner fields
+        // This handles Q in Connect's "output" field: "{\"lob_type\":\"CS\",...}"
+        if ((strVal.startsWith("{") || strVal.startsWith("[")) && strVal.length > 2) {
+          try {
+            const parsed = JSON.parse(strVal);
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              for (const [innerKey, innerVal] of Object.entries(parsed as Record<string, unknown>)) {
+                if (SKIP_KEYS.has(innerKey)) continue;
+                if (innerVal == null || innerVal === "") continue;
+                if (typeof innerVal === "string" || typeof innerVal === "number" || typeof innerVal === "boolean") {
+                  const innerStr = String(innerVal);
+                  if (innerStr.length > 200) continue;
+                  if (/^arn:aws:/.test(innerStr)) continue;
+                  params[innerKey] = innerVal;
+                }
+              }
+              continue; // Don't store the raw JSON string
+            }
+          } catch { /* not valid JSON */ }
+        }
+
+        // Regular short string
+        if (strVal.length <= 200) {
+          params[key] = value;
+        }
+      } else if (typeof value === "number" || typeof value === "boolean") {
+        params[key] = value;
+      }
+    }
+
+    // Check for explicit contact_attributes / session_attributes objects
+    const attrFields = [
+      data.contact_attributes, data.contactAttributes, data.ContactAttributes,
+      data.session_attributes, data.sessionAttributes, data.SessionAttributes,
+    ];
+
+    for (const attrField of attrFields) {
+      if (attrField && typeof attrField === "object" && !Array.isArray(attrField)) {
+        const attrs = attrField as Record<string, unknown>;
+        for (const [key, value] of Object.entries(attrs)) {
+          if (value != null && value !== "" && !SKIP_KEYS.has(key)) {
+            params[key] = flattenValue(value);
+          }
+        }
+      }
+    }
+  }
+
+  // Extract from tool call inputs — these are the arguments the agent passes
+  for (const tc of toolCalls) {
+    if (tc.input && typeof tc.input === "object") {
+      extractFlatParams(tc.input, params, SKIP_KEYS);
+    }
+
+    // Extract from tool results
+    if (tc.result?.content) {
+      if (typeof tc.result.content === "string") {
+        try {
+          const parsed = JSON.parse(tc.result.content);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            extractFlatParams(parsed as Record<string, unknown>, params, SKIP_KEYS);
+          }
+        } catch { /* not JSON, skip */ }
+      } else if (typeof tc.result.content === "object" && !Array.isArray(tc.result.content)) {
+        extractFlatParams(tc.result.content as Record<string, unknown>, params, SKIP_KEYS);
+      }
+    }
+  }
+
+  return params;
+}
+
+/** Recursively extract scalar key-value pairs from an object (1 level deep for nested objects) */
+function extractFlatParams(
+  obj: Record<string, unknown>,
+  params: SessionParameters,
+  skipKeys: Set<string>
+) {
+  for (const [key, value] of Object.entries(obj)) {
+    if (skipKeys.has(key)) continue;
+    if (value == null || value === "") continue;
+
+    if (typeof value === "string") {
+      const strVal = value;
+      // Skip ARNs, UUIDs, and very long strings
+      if (strVal.length > 500) continue;
+      if (/^arn:aws:/.test(strVal)) continue;
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(strVal)) continue;
+
+      // If the string looks like JSON (starts with { or [), try parsing it
+      // This handles Q in Connect's "output" field which is a stringified JSON
+      // e.g. output: "{\"lob_type\":\"CS\",\"uid\":\"123\"}"
+      if ((strVal.startsWith("{") || strVal.startsWith("[")) && strVal.length > 2) {
+        try {
+          const parsed = JSON.parse(strVal);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            // Extract the inner object's fields as parameters
+            for (const [innerKey, innerVal] of Object.entries(parsed as Record<string, unknown>)) {
+              if (skipKeys.has(innerKey)) continue;
+              if (innerVal == null || innerVal === "") continue;
+              if (typeof innerVal === "string" || typeof innerVal === "number" || typeof innerVal === "boolean") {
+                const innerStr = String(innerVal);
+                if (innerStr.length > 200) continue;
+                if (/^arn:aws:/.test(innerStr)) continue;
+                params[innerKey] = innerVal;
+              }
+            }
+            continue; // Don't store the raw JSON string itself
+          }
+        } catch { /* not valid JSON, store as regular string below */ }
+      }
+
+      // Regular string value — only store if reasonably short
+      if (strVal.length <= 200) {
+        params[key] = value;
+      }
+    } else if (typeof value === "number" || typeof value === "boolean") {
+      params[key] = value;
+    } else if (typeof value === "object" && !Array.isArray(value)) {
+      // One level deep: extract nested object's scalar values
+      const nested = value as Record<string, unknown>;
+      for (const [nk, nv] of Object.entries(nested)) {
+        if (skipKeys.has(nk)) continue;
+        if (nv == null || nv === "") continue;
+        if (typeof nv === "string" || typeof nv === "number" || typeof nv === "boolean") {
+          const strNv = String(nv);
+          if (strNv.length > 200) continue;
+          if (/^arn:aws:/.test(strNv)) continue;
+          params[nk] = nv;
+        }
+      }
+    } else if (Array.isArray(value) && value.length > 0 && value.length <= 10) {
+      const allScalar = value.every(v => typeof v === "string" || typeof v === "number");
+      if (allScalar) {
+        params[key] = value.join(", ");
+      }
+    }
+  }
+}
+
+/** Flatten a value to a storable scalar */
+function flattenValue(value: unknown): string | number | boolean {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  return JSON.stringify(value);
+}
+
 // ─── Build Full Session Detail ───────────────────────────────────────────────
 
 export function buildSessionDetail(events: ParsedLogEvent[]): SessionDetail {
@@ -640,6 +838,7 @@ export function buildSessionDetail(events: ParsedLogEvent[]): SessionDetail {
   const toolCalls = extractToolCalls(messages);
   const metrics = computeMetrics(spans);
   const detectedIssues = detectIssues(messages, toolCalls, guardrails);
+  const parameters = extractSessionParameters(events, toolCalls);
 
   const timestamps = events.map((e) => e.timestamp).filter((t) => t > 0);
   const startTime = timestamps.length > 0 ? Math.min(...timestamps) : 0;
@@ -655,6 +854,7 @@ export function buildSessionDetail(events: ParsedLogEvent[]): SessionDetail {
     metrics,
     guardrails,
     detectedIssues,
+    parameters,
   };
 }
 

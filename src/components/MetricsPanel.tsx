@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import type { SessionMetrics, GuardrailEvent } from "@/lib/types";
 
 interface MetricsPanelProps {
@@ -9,12 +10,9 @@ interface MetricsPanelProps {
 
 export function MetricsPanel({ metrics, guardrails }: MetricsPanelProps) {
   return (
-    <div className="p-3 space-y-4">
+    <div className="p-3 space-y-1">
       {/* Token Usage */}
-      <section>
-        <h3 className="text-xs font-medium text-dark-400 uppercase tracking-wider px-1 mb-2">
-          Token Usage
-        </h3>
+      <CollapsibleSection title="Token Usage" defaultOpen={false}>
         <div className="grid grid-cols-2 gap-2">
           <MetricCard
             label="Input Tokens"
@@ -38,13 +36,10 @@ export function MetricsPanel({ metrics, guardrails }: MetricsPanelProps) {
             highlight={metrics.cacheHitRatio > 0.5}
           />
         </div>
-      </section>
+      </CollapsibleSection>
 
       {/* Latency */}
-      <section>
-        <h3 className="text-xs font-medium text-dark-400 uppercase tracking-wider px-1 mb-2">
-          Latency (TTFT)
-        </h3>
+      <CollapsibleSection title="Latency (TTFT)" defaultOpen={false}>
         <div className="grid grid-cols-2 gap-2">
           <MetricCard
             label="Avg TTFT"
@@ -60,13 +55,10 @@ export function MetricsPanel({ metrics, guardrails }: MetricsPanelProps) {
             warning={metrics.maxTimeToFirstToken > 5000}
           />
         </div>
-      </section>
+      </CollapsibleSection>
 
       {/* Orchestration */}
-      <section>
-        <h3 className="text-xs font-medium text-dark-400 uppercase tracking-wider px-1 mb-2">
-          Orchestration
-        </h3>
+      <CollapsibleSection title="Orchestration" defaultOpen={false}>
         <div className="grid grid-cols-2 gap-2">
           <MetricCard
             label="Total Iterations"
@@ -79,14 +71,11 @@ export function MetricsPanel({ metrics, guardrails }: MetricsPanelProps) {
             icon="⚡"
           />
         </div>
-      </section>
+      </CollapsibleSection>
 
       {/* Span Details */}
       {metrics.spans.length > 0 && (
-        <section>
-          <h3 className="text-xs font-medium text-dark-400 uppercase tracking-wider px-1 mb-2">
-            Model Invocations
-          </h3>
+        <CollapsibleSection title="Model Invocations" defaultOpen={false}>
           <div className="space-y-1 max-h-48 overflow-y-auto">
             {metrics.spans.map((span, idx) => (
               <div
@@ -120,14 +109,14 @@ export function MetricsPanel({ metrics, guardrails }: MetricsPanelProps) {
               </div>
             ))}
           </div>
-        </section>
+        </CollapsibleSection>
       )}
 
       {/* Guardrails */}
-      <section>
-        <h3 className="text-xs font-medium text-dark-400 uppercase tracking-wider px-1 mb-2">
-          Guardrails ({guardrails.length})
-        </h3>
+      <CollapsibleSection
+        title={`Guardrails (${guardrails.length})`}
+        defaultOpen={guardrails.some((g) => g.action === "BLOCKED")}
+      >
         {guardrails.length === 0 ? (
           <p className="text-xs text-dark-600 px-1">No guardrail events</p>
         ) : (
@@ -180,10 +169,52 @@ export function MetricsPanel({ metrics, guardrails }: MetricsPanelProps) {
             ))}
           </div>
         )}
-      </section>
+      </CollapsibleSection>
     </div>
   );
 }
+
+// ─── Collapsible Section ─────────────────────────────────────────────────────
+
+function CollapsibleSection({
+  title,
+  defaultOpen = false,
+  children,
+}: {
+  title: string;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+
+  return (
+    <section className="border border-dark-800 rounded-lg overflow-hidden">
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center justify-between px-3 py-2 hover:bg-dark-800/50 transition-colors"
+      >
+        <h3 className="text-xs font-medium text-dark-400 uppercase tracking-wider">
+          {title}
+        </h3>
+        <svg
+          className={`w-3.5 h-3.5 text-dark-500 transition-transform duration-200 ${open ? "rotate-180" : ""}`}
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+      {open && (
+        <div className="px-3 pb-3">
+          {children}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ─── Metric Card ─────────────────────────────────────────────────────────────
 
 function MetricCard({
   label,

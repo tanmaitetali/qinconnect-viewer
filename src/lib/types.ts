@@ -111,6 +111,10 @@ export interface SessionSummary {
   firstCustomerMessage?: string;
 }
 
+export interface SessionParameters {
+  [key: string]: string | number | boolean | null;
+}
+
 export interface SessionDetail {
   sessionId: string;
   contactId: string;
@@ -121,6 +125,7 @@ export interface SessionDetail {
   metrics: SessionMetrics;
   guardrails: GuardrailEvent[];
   detectedIssues: DetectedIssue[];
+  parameters: SessionParameters;
 }
 
 // ─── Raw CloudWatch Log Event ────────────────────────────────────────────────

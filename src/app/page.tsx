@@ -6,6 +6,7 @@ import { ConversationView } from "@/components/ConversationView";
 import { ToolCallPanel } from "@/components/ToolCallPanel";
 import { MetricsPanel } from "@/components/MetricsPanel";
 import { ErrorDetector } from "@/components/ErrorDetector";
+import { ParametersPanel } from "@/components/ParametersPanel";
 import type { SessionSummary, SessionDetail } from "@/lib/types";
 
 interface AwsConfig {
@@ -41,7 +42,7 @@ export default function DashboardPage() {
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hoursBack, setHoursBack] = useState(1);
-  const [rightPanel, setRightPanel] = useState<"metrics" | "tools" | "errors">("metrics");
+  const [rightPanel, setRightPanel] = useState<"metrics" | "tools" | "errors" | "params">("metrics");
 
   // Load saved config on mount
   useEffect(() => {
@@ -332,19 +333,41 @@ export default function DashboardPage() {
         {/* Time filter */}
         <div className="p-3 border-b border-dark-800">
           <label className="text-xs text-dark-400 block mb-1">Time Range</label>
-          <select
-            value={hoursBack}
-            onChange={(e) => setHoursBack(parseInt(e.target.value, 10))}
-            className="w-full bg-dark-800 border border-dark-700 rounded px-2 py-1.5 text-sm text-dark-200 focus:outline-none focus:ring-1 focus:ring-blue-500"
-          >
-            <option value={1}>Last 1 hour</option>
-            <option value={4}>Last 4 hours</option>
-            <option value={12}>Last 12 hours</option>
-            <option value={24}>Last 24 hours</option>
-            <option value={48}>Last 48 hours</option>
-            <option value={72}>Last 3 days</option>
-            <option value={168}>Last 7 days</option>
-          </select>
+          <div className="flex gap-2">
+            <select
+              value={hoursBack}
+              onChange={(e) => setHoursBack(parseInt(e.target.value, 10))}
+              className="flex-1 bg-dark-800 border border-dark-700 rounded px-2 py-1.5 text-sm text-dark-200 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            >
+              <option value={1}>Last 1 hour</option>
+              <option value={4}>Last 4 hours</option>
+              <option value={12}>Last 12 hours</option>
+              <option value={24}>Last 24 hours</option>
+              <option value={48}>Last 48 hours</option>
+              <option value={72}>Last 3 days</option>
+              <option value={168}>Last 7 days</option>
+            </select>
+            <button
+              onClick={fetchSessions}
+              disabled={sessionsLoading}
+              className="flex items-center justify-center w-9 h-9 rounded bg-dark-800 border border-dark-700 hover:bg-dark-700 hover:border-dark-600 text-dark-300 hover:text-dark-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Refresh sessions"
+            >
+              <svg
+                className={`w-4 h-4 ${sessionsLoading ? "animate-spin" : ""}`}
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                />
+              </svg>
+            </button>
+          </div>
         </div>
 
         <SessionList
@@ -443,6 +466,21 @@ export default function DashboardPage() {
                   Tools ({selectedSession.toolCalls.length})
                 </button>
                 <button
+                  onClick={() => setRightPanel("params")}
+                  className={`flex-1 px-3 py-2.5 text-xs font-medium transition-colors ${
+                    rightPanel === "params"
+                      ? "text-blue-400 border-b-2 border-blue-400 bg-dark-800/50"
+                      : "text-dark-400 hover:text-dark-200"
+                  }`}
+                >
+                  Params
+                  {Object.keys(selectedSession.parameters).length > 0 && (
+                    <span className="ml-1 inline-flex items-center justify-center min-w-[16px] h-4 text-[10px] bg-dark-600 text-dark-200 rounded-full px-1">
+                      {Object.keys(selectedSession.parameters).length}
+                    </span>
+                  )}
+                </button>
+                <button
                   onClick={() => setRightPanel("errors")}
                   className={`flex-1 px-3 py-2.5 text-xs font-medium transition-colors relative ${
                     rightPanel === "errors"
@@ -468,6 +506,9 @@ export default function DashboardPage() {
                 )}
                 {rightPanel === "tools" && (
                   <ToolCallPanel toolCalls={selectedSession.toolCalls} />
+                )}
+                {rightPanel === "params" && (
+                  <ParametersPanel parameters={selectedSession.parameters} />
                 )}
                 {rightPanel === "errors" && (
                   <ErrorDetector
