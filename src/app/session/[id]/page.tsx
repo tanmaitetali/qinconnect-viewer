@@ -10,7 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { ParsedSession } from "@/types";
 import { cn, formatDuration, formatTimestamp } from "@/lib/utils";
-import { ArrowLeft, Loader2 } from "lucide-react";
+import { ArrowLeft, Loader2, Check, Copy } from "lucide-react";
 import Link from "next/link";
 
 type TabId = "conversation" | "tools" | "metrics" | "issues";
@@ -37,6 +37,28 @@ export default function SessionDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>("conversation");
+  const [copiedContact, setCopiedContact] = useState(false);
+  const [copiedSession, setCopiedSession] = useState(false);
+
+  const copyContactId = async (contactId: string) => {
+    try {
+      await navigator.clipboard.writeText(contactId);
+      setCopiedContact(true);
+      setTimeout(() => setCopiedContact(false), 1500);
+    } catch {
+      // Clipboard API can fail in insecure contexts — fail silently
+    }
+  };
+
+  const copySessionId = async (sessionId: string) => {
+    try {
+      await navigator.clipboard.writeText(sessionId);
+      setCopiedSession(true);
+      setTimeout(() => setCopiedSession(false), 1500);
+    } catch {
+      // Clipboard API can fail in insecure contexts — fail silently
+    }
+  };
 
   useEffect(() => {
     const fetchSession = async () => {
@@ -123,15 +145,35 @@ export default function SessionDetailPage() {
         <div className="flex items-start justify-between">
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="font-mono text-sm font-bold">{session.session_id}</h1>
+              <button
+                onClick={() => copySessionId(session.session_id)}
+                className="flex items-center gap-1.5 font-mono text-sm font-bold hover:text-muted-foreground transition-colors"
+                title="Copy session ID"
+              >
+                Session: {session.session_id}
+                {copiedSession ? (
+                  <Check className="h-3 w-3 text-green-400" />
+                ) : (
+                  <Copy className="h-3 w-3" />
+                )}
+              </button>
               <Badge variant={outcomeBadgeVariant[session.outcome]}>
                 {session.outcome}
               </Badge>
             </div>
             {session.contact_id && (
-              <p className="text-xs text-muted-foreground font-mono mt-1">
+              <button
+                onClick={() => copyContactId(session.contact_id!)}
+                className="flex items-center gap-1.5 text-xs text-muted-foreground font-mono mt-1 hover:text-foreground transition-colors"
+                title="Copy contact ID"
+              >
                 Contact: {session.contact_id}
-              </p>
+                {copiedContact ? (
+                  <Check className="h-3 w-3 text-green-400" />
+                ) : (
+                  <Copy className="h-3 w-3" />
+                )}
+              </button>
             )}
             <div className="flex items-center gap-4 mt-2 text-xs text-muted-foreground">
               <span>Started: {formatTimestamp(session.start_time)}</span>
