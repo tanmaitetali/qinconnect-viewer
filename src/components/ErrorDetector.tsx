@@ -234,7 +234,7 @@ function formatIssueType(type: string): string {
     EMPTY_KB_RESULTS: "Empty KB",
     MISSING_REQUIRED_PARAMETERS: "Missing Params",
     GUARDRAIL_BLOCKED: "Guardrail Block",
-    TEXT_AND_TOOL_USE_SAME_ITERATION: "Issue #8",
+    TEXT_AND_TOOL_USE_SAME_ITERATION: "Text + Tool Use",
     TOOL_ERROR: "Tool Error",
     MAX_ITERATIONS_REACHED: "Max Iterations",
     UNKNOWN_ERROR: "Error",

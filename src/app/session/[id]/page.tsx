@@ -185,8 +185,6 @@ export default function SessionDetailPage() {
                   )}
                 </span>
               )}
-              <span>{session.messages.length} messages</span>
-              <span>{session.tool_calls.length} tool calls</span>
             </div>
           </div>
         </div>

@@ -223,11 +223,19 @@ function parseToolResult(content: unknown): ToolResult {
       }
       return { success: true, content: parsed, isEmpty: false };
     } catch {
-      // Check for error patterns in string
-      if (content.includes("error") || content.includes("Error")) {
+      // Only flag as error if it looks like a structured error message,
+      // not if "error" appears incidentally in content text (e.g. KB articles
+      // mentioning "Error 142" in their body). Check for error-as-structure
+      // patterns rather than substring matching on the whole content.
+      const trimmed = content.trim();
+      const looksLikeStructuredError =
+        /^\{"error"\s*:/.test(trimmed) ||          // JSON with top-level "error" key
+        /^error\s*:/i.test(trimmed) ||             // "Error: something"
+        /^\{"status"\s*:\s*"error"/i.test(trimmed); // {"status":"error",...}
+      if (looksLikeStructuredError) {
         return { success: false, content, isEmpty: false, error: content };
       }
-      return { success: true, content, isEmpty: content.trim() === "" };
+      return { success: true, content, isEmpty: trimmed === "" };
     }
   }
 
@@ -669,7 +677,7 @@ export function detectIssues(
     }
   }
 
-  // Issue #8: text + tool_use in same orchestration iteration
+  // Text + tool_use in same orchestration iteration
   const iterationContent = new Map<number, Set<string>>();
   for (const msg of messages) {
     const iter = msg.orchestrationIteration || 0;
@@ -687,7 +695,7 @@ export function detectIssues(
         id: `issue-text-tooluse-iter-${iter}`,
         type: "TEXT_AND_TOOL_USE_SAME_ITERATION",
         severity: "warning",
-        message: `Issue #8: Text and tool_use in same orchestration iteration ${iter}`,
+        message: `Text and tool_use in same orchestration iteration ${iter}`,
         timestamp: messages.find((m) => m.orchestrationIteration === iter)?.timestamp || 0,
         context: { iteration: iter },
         orchestrationIteration: iter,

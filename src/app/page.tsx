@@ -480,10 +480,6 @@ export default function DashboardPage() {
                       </button>
                     </>
                   )}
-                  <span className="mx-2">·</span>
-                  <span>{selectedSession.messages.length} messages</span>
-                  <span className="mx-2">·</span>
-                  <span>{selectedSession.toolCalls.length} tool calls</span>
                 </div>
                 <button
                   onClick={() => downloadParsedLog(selectedSession)}
@@ -509,26 +505,6 @@ export default function DashboardPage() {
               {/* Panel tabs */}
               <div className="flex border-b border-dark-800">
                 <button
-                  onClick={() => setRightPanel("metrics")}
-                  className={`flex-1 px-3 py-2.5 text-xs font-medium transition-colors ${
-                    rightPanel === "metrics"
-                      ? "text-blue-400 border-b-2 border-blue-400 bg-dark-800/50"
-                      : "text-dark-400 hover:text-dark-200"
-                  }`}
-                >
-                  Metrics
-                </button>
-                <button
-                  onClick={() => setRightPanel("tools")}
-                  className={`flex-1 px-3 py-2.5 text-xs font-medium transition-colors ${
-                    rightPanel === "tools"
-                      ? "text-blue-400 border-b-2 border-blue-400 bg-dark-800/50"
-                      : "text-dark-400 hover:text-dark-200"
-                  }`}
-                >
-                  Tools ({selectedSession.toolCalls.length})
-                </button>
-                <button
                   onClick={() => setRightPanel("params")}
                   className={`flex-1 px-3 py-2.5 text-xs font-medium transition-colors ${
                     rightPanel === "params"
@@ -542,6 +518,16 @@ export default function DashboardPage() {
                       {Object.keys(selectedSession.parameters).length}
                     </span>
                   )}
+                </button>
+                <button
+                  onClick={() => setRightPanel("tools")}
+                  className={`flex-1 px-3 py-2.5 text-xs font-medium transition-colors ${
+                    rightPanel === "tools"
+                      ? "text-blue-400 border-b-2 border-blue-400 bg-dark-800/50"
+                      : "text-dark-400 hover:text-dark-200"
+                  }`}
+                >
+                  Tools ({selectedSession.toolCalls.length})
                 </button>
                 <button
                   onClick={() => setRightPanel("errors")}
@@ -558,20 +544,30 @@ export default function DashboardPage() {
                     </span>
                   )}
                 </button>
+                <button
+                  onClick={() => setRightPanel("metrics")}
+                  className={`flex-1 px-3 py-2.5 text-xs font-medium transition-colors ${
+                    rightPanel === "metrics"
+                      ? "text-blue-400 border-b-2 border-blue-400 bg-dark-800/50"
+                      : "text-dark-400 hover:text-dark-200"
+                  }`}
+                >
+                  Metrics
+                </button>
               </div>
 
               <div className="flex-1 overflow-y-auto">
-                {rightPanel === "metrics" && (
-                  <MetricsPanel
-                    metrics={selectedSession.metrics}
-                    guardrails={selectedSession.guardrails}
-                  />
-                )}
                 {rightPanel === "tools" && (
                   <ToolCallPanel toolCalls={selectedSession.toolCalls} />
                 )}
                 {rightPanel === "params" && (
                   <ParametersPanel parameters={selectedSession.parameters} />
+                )}
+                {rightPanel === "metrics" && (
+                  <MetricsPanel
+                    metrics={selectedSession.metrics}
+                    guardrails={selectedSession.guardrails}
+                  />
                 )}
                 {rightPanel === "errors" && (
                   <ErrorDetector

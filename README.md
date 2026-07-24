@@ -60,7 +60,7 @@ Frontend config (localStorage) takes priority over `.env.local`.
 - **Conversation view** — chat-style timeline (customer/bot/tool calls)
 - **Tool calls panel** — expandable cards with inputs and results
 - **Metrics panel** — token usage, TTFT, cache hit ratio, model invocations
-- **Issue detection** — auto-flags empty KB results, tool errors, guardrail blocks, Issue #8
+- **Issue detection** — auto-flags empty KB results, tool errors, guardrail blocks, text+tool in same iteration
 - **AI analysis** — one-click Bedrock analysis with fix recommendations (requires Bedrock access)
 - **Export log** — download a compact `.txt` of the parsed session for pasting into AI chats
 
@@ -127,9 +127,6 @@ npm run lint     # ESLint
 ```
 
 ## Troubleshooting
-
-**Hot reload not working (WSL2 + Windows paths)**
-→ Already configured: `next.config.mjs` uses webpack polling (1s interval).
 
 **"Access to this model is not available for channel program accounts"**
 → Your Bedrock profile is on a channel/reseller account. Use a different AWS profile that has direct Bedrock access, or use Amazon Nova models instead of Anthropic.
