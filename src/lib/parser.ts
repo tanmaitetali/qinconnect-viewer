@@ -51,13 +51,30 @@ function detectEventType(data: Record<string, unknown>): LogEventType {
 }
 
 function extractContactId(data: Record<string, unknown>): string {
-  return (
+  const direct =
     (data.contactId as string) ||
     (data.ContactId as string) ||
     (data.contact_id as string) ||
     (data.contactArn as string)?.split("/").pop() ||
-    ""
-  );
+    "";
+  if (direct) return direct;
+
+  // Q in Connect's TRANSCRIPT_CREATE_SESSION event carries the Connect
+  // contact ID in "session_name" (there is no top-level contact_id field).
+  if (typeof data.session_name === "string" && data.session_name) {
+    return data.session_name;
+  }
+
+  // TRANSCRIPT_AI_AGENT_TRACE / LLM_INVOCATION events embed the contact ID
+  // inside the "span" string (e.g. "{..., contact_id=xxxx-xxxx, ...}").
+  if (typeof data.span === "string") {
+    const match = data.span.match(
+      /\bcontact_id=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i
+    );
+    if (match) return match[1];
+  }
+
+  return "";
 }
 
 function extractSessionId(
@@ -290,6 +307,186 @@ export function parseTraceSpan(event: ParsedLogEvent): TraceSpan | null {
     modelId: modelId || undefined,
     durationMs,
   };
+}
+
+// ─── Trace Span Field Extraction (bracket-aware) ─────────────────────────────
+//
+// Q in Connect trace "span" strings are a flat key=value list, but several
+// values (input_messages, output_messages, response_finish_reasons, etc.)
+// are themselves JSON arrays/objects containing commas. A naive comma-split
+// (as used by parseTraceSpan above for simple numeric fields) corrupts
+// anything that comes after the first JSON blob. This helper walks the
+// string and respects bracket/quote nesting so JSON-valued fields can be
+// extracted reliably regardless of position.
+
+function extractSpanField(rawSpan: string, key: string): string | undefined {
+  const marker = `${key}=`;
+  const idx = rawSpan.indexOf(marker);
+  if (idx === -1) return undefined;
+  const start = idx + marker.length;
+  const firstChar = rawSpan[start];
+
+  if (firstChar === "[" || firstChar === "{") {
+    const open = firstChar;
+    const close = open === "[" ? "]" : "}";
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let i = start; i < rawSpan.length; i++) {
+      const ch = rawSpan[i];
+      if (inString) {
+        if (escape) escape = false;
+        else if (ch === "\\") escape = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+      } else if (ch === open) {
+        depth++;
+      } else if (ch === close) {
+        depth--;
+        if (depth === 0) return rawSpan.slice(start, i + 1);
+      }
+    }
+    return rawSpan.slice(start); // unterminated — best effort
+  }
+
+  // Scalar value: read until the next ", identifier=" or end of string
+  const rest = rawSpan.slice(start);
+  const match = rest.match(/,\s*(?=[A-Za-z_][A-Za-z0-9_]*=)/);
+  const end = match?.index !== undefined ? start + match.index : rawSpan.length;
+  let value = rawSpan.slice(start, end).trim();
+  if (value.endsWith("}") && !firstChar) value = value.slice(0, -1);
+  return value;
+}
+
+// ─── Recover Tool Calls from execute_tool Trace Spans ────────────────────────
+//
+// Control-flow tools like "Complete" and "Escalate" are never emitted as
+// tool_use/tool_result blocks inside TRANSCRIPT_ORCHESTRATION_MESSAGE events.
+// The only record of them is an "execute_tool" span inside a
+// TRANSCRIPT_AI_AGENT_TRACE event. Without this, those tool calls silently
+// disappear from both the Tools panel AND the conversation transcript (the
+// transcript only renders from `messages`, not `toolCalls`), which is why a
+// tool like "Complete" showed up as an empty chat bubble instead of a proper
+// tool-call bubble like PivitSendTool gets.
+//
+// This returns synthetic ParsedMessage entries (tool_use + tool_result) so
+// the recovered call flows through the exact same rendering path as tool
+// calls that do appear in orchestration messages.
+
+function parseExecuteToolSpanMessages(
+  event: ParsedLogEvent,
+  existingToolUseIds: Set<string>,
+  inferredIteration: number
+): ParsedMessage[] {
+  const rawSpan = event.data.span;
+  if (typeof rawSpan !== "string" || !rawSpan.includes("span_name=execute_tool")) {
+    return [];
+  }
+
+  const inputMessagesRaw = extractSpanField(rawSpan, "input_messages");
+  if (!inputMessagesRaw) return [];
+
+  let toolName = "";
+  let toolUseId = "";
+  let toolInput: Record<string, unknown> = {};
+
+  try {
+    const inputMessages = JSON.parse(inputMessagesRaw) as Array<Record<string, unknown>>;
+    for (const m of inputMessages) {
+      const values = (m.values as Array<Record<string, unknown>>) || [];
+      for (const v of values) {
+        const toolUse = v.toolUse as Record<string, unknown> | undefined;
+        if (toolUse) {
+          toolName = String(toolUse.name || "");
+          toolUseId = String(toolUse.toolUseId || "");
+          const rawInput = toolUse.input;
+          if (typeof rawInput === "string") {
+            try {
+              toolInput = JSON.parse(rawInput);
+            } catch {
+              toolInput = {};
+            }
+          } else if (rawInput && typeof rawInput === "object") {
+            toolInput = rawInput as Record<string, unknown>;
+          }
+        }
+      }
+    }
+  } catch {
+    return [];
+  }
+
+  if (!toolName) return [];
+  if (toolUseId && existingToolUseIds.has(toolUseId)) return [];
+
+  let result: ToolResult | undefined;
+  const outputMessagesRaw = extractSpanField(rawSpan, "output_messages");
+  if (outputMessagesRaw) {
+    try {
+      const outputMessages = JSON.parse(outputMessagesRaw) as Array<Record<string, unknown>>;
+      for (const m of outputMessages) {
+        const values = (m.values as Array<Record<string, unknown>>) || [];
+        for (const v of values) {
+          const toolResultBlock = v.toolResult as Record<string, unknown> | undefined;
+          if (toolResultBlock) {
+            result = parseToolResult(toolResultBlock.value ?? toolResultBlock.error ?? "");
+          }
+        }
+      }
+    } catch {
+      // ignore malformed output — result stays undefined
+    }
+  }
+
+  const spanId = extractSpanField(rawSpan, "span_id") || "";
+  const startTs = Number(extractSpanField(rawSpan, "start_timestamp") || event.timestamp);
+  const endTs = Number(extractSpanField(rawSpan, "end_timestamp") || 0);
+  const idBase = toolUseId || `${event.timestamp}-execute_tool-${spanId}`;
+
+  const recovered: ParsedMessage[] = [
+    {
+      id: `${idBase}-tool_use`,
+      timestamp: startTs || event.timestamp,
+      type: "tool_use",
+      text: `Tool: ${toolName}`,
+      toolName,
+      toolInput,
+      orchestrationIteration: inferredIteration,
+      raw: { type: "tool_use", tool_use_id: toolUseId, name: toolName, arguments: toolInput },
+    },
+  ];
+
+  if (result) {
+    recovered.push({
+      id: `${idBase}-tool_result`,
+      timestamp: endTs || startTs || event.timestamp,
+      type: "tool_result",
+      text: result.success
+        ? result.isEmpty
+          ? "Tool result: empty"
+          : "Tool result: success"
+        : `Tool error: ${result.error || "unknown"}`,
+      toolResult: result,
+      orchestrationIteration: inferredIteration,
+      raw: { type: "tool_result", tool_use_id: toolUseId, name: toolName },
+    });
+  }
+
+  return recovered;
+}
+
+// Finds the orchestration_iteration of the most recent message at or before
+// the given timestamp, falling back to 0 (untagged) if none precede it.
+function inferIterationAt(messages: ParsedMessage[], timestamp: number): number {
+  let iter = 0;
+  for (const m of messages) {
+    if (m.timestamp > timestamp) break;
+    if (m.orchestrationIteration) iter = m.orchestrationIteration;
+  }
+  return iter;
 }
 
 // ─── Parse Guardrail Events ──────────────────────────────────────────────────
@@ -798,6 +995,7 @@ export function buildSessionDetail(events: ParsedLogEvent[]): SessionDetail {
   const messages: ParsedMessage[] = [];
   const spans: TraceSpan[] = [];
   const guardrails: GuardrailEvent[] = [];
+  const traceEvents: ParsedLogEvent[] = [];
 
   for (const event of events) {
     switch (event.eventType) {
@@ -815,6 +1013,10 @@ export function buildSessionDetail(events: ParsedLogEvent[]): SessionDetail {
         // Traces can also contain guardrail info
         const grTrace = parseGuardrailEvent(event);
         if (grTrace) guardrails.push(grTrace);
+        // Hold onto raw trace events — some tool calls (e.g. Complete,
+        // Escalate) never appear as orchestration messages and can only
+        // be recovered from "execute_tool" spans below.
+        traceEvents.push(event);
         break;
       }
       case "TRANSCRIPT_AGENTIC_MESSAGE": {
@@ -835,7 +1037,36 @@ export function buildSessionDetail(events: ParsedLogEvent[]): SessionDetail {
   // Sort messages by timestamp
   messages.sort((a, b) => a.timestamp - b.timestamp);
 
+  // Recover tool calls that only exist as "execute_tool" trace spans
+  // (control-flow tools like Complete/Escalate have no orchestration
+  // message counterpart) and inject them as proper tool_use/tool_result
+  // messages so they render as tool-call bubbles in the conversation view,
+  // not as blank text bubbles. Dedup key is the raw tool_use_id from the
+  // orchestration message block (not ParsedMessage.id, which is a
+  // synthetic composite string).
+  const knownToolUseIds = new Set(
+    messages
+      .filter((m) => m.type === "tool_use")
+      .map((m) => (m.raw as Record<string, unknown> | undefined)?.tool_use_id as string)
+      .filter(Boolean)
+  );
+  const recoveredMessages: ParsedMessage[] = [];
+  for (const traceEvent of traceEvents) {
+    const inferredIteration = inferIterationAt(messages, traceEvent.timestamp);
+    const recovered = parseExecuteToolSpanMessages(traceEvent, knownToolUseIds, inferredIteration);
+    for (const m of recovered) {
+      if (m.type === "tool_use" && m.raw) {
+        const rawToolUseId = (m.raw as Record<string, unknown>).tool_use_id as string;
+        if (rawToolUseId) knownToolUseIds.add(rawToolUseId);
+      }
+    }
+    recoveredMessages.push(...recovered);
+  }
+  messages.push(...recoveredMessages);
+  messages.sort((a, b) => a.timestamp - b.timestamp);
+
   const toolCalls = extractToolCalls(messages);
+
   const metrics = computeMetrics(spans);
   const detectedIssues = detectIssues(messages, toolCalls, guardrails);
   const parameters = extractSessionParameters(events, toolCalls);

@@ -20,6 +20,15 @@ interface AwsConfig {
 
 const STORAGE_KEY = "ai-agent-dashboard-config";
 
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function loadConfig(): AwsConfig | null {
   if (typeof window === "undefined") return null;
   try {
@@ -43,6 +52,24 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [hoursBack, setHoursBack] = useState(1);
   const [rightPanel, setRightPanel] = useState<"metrics" | "tools" | "errors" | "params">("metrics");
+  const [copiedContactId, setCopiedContactId] = useState(false);
+  const [copiedSessionId, setCopiedSessionId] = useState(false);
+
+  const handleCopyContactId = async (contactId: string) => {
+    const ok = await copyToClipboard(contactId);
+    if (ok) {
+      setCopiedContactId(true);
+      setTimeout(() => setCopiedContactId(false), 1500);
+    }
+  };
+
+  const handleCopySessionId = async (sessionId: string) => {
+    const ok = await copyToClipboard(sessionId);
+    if (ok) {
+      setCopiedSessionId(true);
+      setTimeout(() => setCopiedSessionId(false), 1500);
+    }
+  };
 
   // Load saved config on mount
   useEffect(() => {
@@ -415,8 +442,44 @@ export default function DashboardPage() {
             <div className="flex-1 flex flex-col overflow-hidden">
               {/* Session header with download */}
               <div className="flex items-center justify-between px-4 py-2 border-b border-dark-800 bg-dark-900/50">
-                <div className="text-xs text-dark-400">
-                  <span className="font-mono">{selectedSession.sessionId.slice(0, 12)}…</span>
+                <div className="text-xs text-dark-400 flex items-center">
+                  <button
+                    onClick={() => handleCopySessionId(selectedSession.sessionId)}
+                    className="flex items-center gap-1 font-mono hover:text-dark-200 transition-colors"
+                    title="Copy session ID"
+                  >
+                    Session: {selectedSession.sessionId.slice(0, 12)}…
+                    {copiedSessionId ? (
+                      <svg className="w-3 h-3 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                    ) : (
+                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                      </svg>
+                    )}
+                  </button>
+                  {selectedSession.contactId && selectedSession.contactId !== selectedSession.sessionId && (
+                    <>
+                      <span className="mx-2">·</span>
+                      <button
+                        onClick={() => handleCopyContactId(selectedSession.contactId)}
+                        className="flex items-center gap-1 font-mono hover:text-dark-200 transition-colors"
+                        title="Copy contact ID"
+                      >
+                        Contact: {selectedSession.contactId.slice(0, 12)}…
+                        {copiedContactId ? (
+                          <svg className="w-3 h-3 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                        ) : (
+                          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                          </svg>
+                        )}
+                      </button>
+                    </>
+                  )}
                   <span className="mx-2">·</span>
                   <span>{selectedSession.messages.length} messages</span>
                   <span className="mx-2">·</span>
