@@ -1,0 +1,9 @@
+# compiled TS output
+bin/*.js
+bin/*.d.ts
+lib/*.js
+lib/*.d.ts
+
+node_modules
+cdk.out
+.cdk.staging
