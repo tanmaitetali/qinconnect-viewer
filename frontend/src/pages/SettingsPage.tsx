@@ -4,45 +4,18 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../co
 import { CheckCircle2, XCircle, Loader2, FolderSearch, BrainCircuit, ScrollText } from 'lucide-react';
 import { useCredentials } from '../credentials/CredentialsContext';
 import type { AwsCredentials } from '../credentials/types';
+import { parseCredentials, maskSecret } from '../credentials/parseCredentials';
 import { discoverLogGroups } from '../lib/cloudwatch';
 import { analyzeSession } from '../lib/bedrock';
-
-interface CredentialFormState {
-  accessKeyId: string;
-  secretAccessKey: string;
-  sessionToken: string;
-}
-
-const EMPTY_CREDS: CredentialFormState = { accessKeyId: '', secretAccessKey: '', sessionToken: '' };
-
-function toFormState(creds: AwsCredentials | null): CredentialFormState {
-  if (!creds) return EMPTY_CREDS;
-  return {
-    accessKeyId: creds.accessKeyId,
-    secretAccessKey: creds.secretAccessKey,
-    sessionToken: creds.sessionToken ?? '',
-  };
-}
-
-function toCredentials(form: CredentialFormState): AwsCredentials | null {
-  if (!form.accessKeyId.trim() || !form.secretAccessKey.trim()) return null;
-  return {
-    accessKeyId: form.accessKeyId.trim(),
-    secretAccessKey: form.secretAccessKey.trim(),
-    sessionToken: form.sessionToken.trim() || undefined,
-  };
-}
 
 export function SettingsPage() {
   const { settings, setLogsSettings, setBedrockSettings } = useCredentials();
 
-  const [logsCreds, setLogsCreds] = useState<CredentialFormState>(toFormState(settings.logs.credentials));
+  const [logsCreds, setLogsCreds] = useState<AwsCredentials | null>(settings.logs.credentials);
   const [logsRegion, setLogsRegion] = useState(settings.logs.region);
   const [logGroupName, setLogGroupName] = useState(settings.logs.logGroupName);
 
-  const [bedrockCreds, setBedrockCreds] = useState<CredentialFormState>(
-    toFormState(settings.bedrock.credentials),
-  );
+  const [bedrockCreds, setBedrockCreds] = useState<AwsCredentials | null>(settings.bedrock.credentials);
   const [bedrockRegion, setBedrockRegion] = useState(settings.bedrock.region);
   const [modelId, setModelId] = useState(settings.bedrock.modelId);
 
@@ -57,12 +30,12 @@ export function SettingsPage() {
 
   const handleSave = () => {
     setLogsSettings({
-      credentials: toCredentials(logsCreds),
+      credentials: logsCreds,
       region: logsRegion,
       logGroupName,
     });
     setBedrockSettings({
-      credentials: toCredentials(bedrockCreds),
+      credentials: bedrockCreds,
       region: bedrockRegion,
       modelId,
     });
@@ -71,7 +44,7 @@ export function SettingsPage() {
   };
 
   const handleTestLogs = async () => {
-    const credentials = toCredentials(logsCreds);
+    const credentials = logsCreds;
     if (!credentials) {
       setTestResult({ section: 'logs', success: false, message: 'Enter an access key and secret key first.' });
       return;
@@ -98,7 +71,7 @@ export function SettingsPage() {
   };
 
   const handleTestBedrock = async () => {
-    const credentials = toCredentials(bedrockCreds);
+    const credentials = bedrockCreds;
     if (!credentials) {
       setTestResult({
         section: 'bedrock',
@@ -138,7 +111,7 @@ export function SettingsPage() {
   };
 
   const handleDiscoverGroups = async () => {
-    const credentials = toCredentials(logsCreds);
+    const credentials = logsCreds;
     if (!credentials) return;
     setTesting('logs');
     try {
@@ -172,7 +145,7 @@ export function SettingsPage() {
             <CardDescription>AWS credentials for reading CloudWatch logs from your Connect instance.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <CredentialFields value={logsCreds} onChange={setLogsCreds} idPrefix="logs" />
+            <CredentialPaste value={logsCreds} onChange={setLogsCreds} idPrefix="logs" />
 
             <div>
               <label className="text-sm font-medium block mb-1.5 text-dark-200">AWS Region</label>
@@ -237,7 +210,7 @@ export function SettingsPage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <CredentialFields value={bedrockCreds} onChange={setBedrockCreds} idPrefix="bedrock" />
+            <CredentialPaste value={bedrockCreds} onChange={setBedrockCreds} idPrefix="bedrock" />
 
             <div>
               <label className="text-sm font-medium block mb-1.5 text-dark-200">AWS Region</label>
@@ -281,60 +254,109 @@ export function SettingsPage() {
   );
 }
 
-function CredentialFields({
+const PASTE_PLACEHOLDER = `Paste credentials in any of these formats:
+
+export AWS_ACCESS_KEY_ID=AKIA...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_SESSION_TOKEN=...
+
+— or AWS CLI / saml2aws —
+[profile]
+aws_access_key_id = AKIA...
+aws_secret_access_key = ...
+aws_session_token = ...
+region = us-east-1
+
+— or JSON from \`aws sts assume-role\` —
+{ "Credentials": { "AccessKeyId": "...", "SecretAccessKey": "...", "SessionToken": "..." } }`;
+
+function CredentialPaste({
   value,
   onChange,
   idPrefix,
 }: {
-  value: CredentialFormState;
-  onChange: (next: CredentialFormState) => void;
+  value: AwsCredentials | null;
+  onChange: (next: AwsCredentials | null) => void;
   idPrefix: string;
 }) {
+  const [editing, setEditing] = useState(!value);
+  const [paste, setPaste] = useState('');
+  const [parseError, setParseError] = useState<string | null>(null);
+
+  const handleSave = () => {
+    const result = parseCredentials(paste);
+    if (!result.ok) {
+      setParseError(result.error);
+      return;
+    }
+    setParseError(null);
+    setPaste('');
+    setEditing(false);
+    onChange({
+      accessKeyId: result.creds.accessKeyId,
+      secretAccessKey: result.creds.secretAccessKey,
+      sessionToken: result.creds.sessionToken,
+    });
+  };
+
+  if (editing) {
+    return (
+      <div className="space-y-2">
+        <label htmlFor={`${idPrefix}-paste`} className="text-sm font-medium block mb-1.5 text-dark-200">
+          AWS Credentials
+        </label>
+        <textarea
+          id={`${idPrefix}-paste`}
+          value={paste}
+          onChange={(e) => setPaste(e.target.value)}
+          placeholder={PASTE_PLACEHOLDER}
+          rows={8}
+          autoComplete="off"
+          spellCheck={false}
+          className="w-full px-3 py-2 rounded-md bg-dark-800 border border-dark-700 text-xs text-dark-200 font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+        {parseError && (
+          <div className="flex items-start gap-3 p-3 rounded-lg border bg-red-500/10 border-red-500/30">
+            <XCircle className="h-4 w-4 text-red-400 flex-shrink-0 mt-0.5" />
+            <p className="text-xs text-dark-200">{parseError}</p>
+          </div>
+        )}
+        <div className="flex items-center gap-2">
+          <Button size="sm" onClick={handleSave} disabled={!paste.trim()}>
+            Save Credentials
+          </Button>
+          {value && (
+            <Button variant="outline" size="sm" onClick={() => setEditing(false)}>
+              Cancel
+            </Button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="space-y-3">
-      <div>
-        <label htmlFor={`${idPrefix}-access-key`} className="text-sm font-medium block mb-1.5 text-dark-200">
-          Access Key ID
-        </label>
-        <input
-          id={`${idPrefix}-access-key`}
-          type="text"
-          value={value.accessKeyId}
-          onChange={(e) => onChange({ ...value, accessKeyId: e.target.value })}
-          placeholder="AKIA..."
-          autoComplete="off"
-          className="w-full px-3 py-2 rounded-md bg-dark-800 border border-dark-700 text-sm text-dark-200 font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-        />
+    <div className="space-y-2">
+      <div className="text-xs font-mono text-dark-300 space-y-0.5">
+        <div>access key id: {value?.accessKeyId}</div>
+        <div>secret: {maskSecret(value?.secretAccessKey)}</div>
+        {value?.sessionToken && <div>token: {maskSecret(value.sessionToken)}</div>}
       </div>
-      <div>
-        <label htmlFor={`${idPrefix}-secret-key`} className="text-sm font-medium block mb-1.5 text-dark-200">
-          Secret Access Key
-        </label>
-        <input
-          id={`${idPrefix}-secret-key`}
-          type="password"
-          value={value.secretAccessKey}
-          onChange={(e) => onChange({ ...value, secretAccessKey: e.target.value })}
-          autoComplete="off"
-          className="w-full px-3 py-2 rounded-md bg-dark-800 border border-dark-700 text-sm text-dark-200 font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-        />
-      </div>
-      <div>
-        <label htmlFor={`${idPrefix}-session-token`} className="text-sm font-medium block mb-1.5 text-dark-200">
-          Session Token <span className="text-dark-500 font-normal">(only for temporary credentials)</span>
-        </label>
-        <input
-          id={`${idPrefix}-session-token`}
-          type="password"
-          value={value.sessionToken}
-          onChange={(e) => onChange({ ...value, sessionToken: e.target.value })}
-          autoComplete="off"
-          className="w-full px-3 py-2 rounded-md bg-dark-800 border border-dark-700 text-sm text-dark-200 font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-        />
-        <p className="text-xs text-dark-500 mt-1">
-          Required for temporary/STS credentials, e.g. from{' '}
-          <code className="font-mono">saml2aws</code>. Leave blank for long-lived IAM user keys.
-        </p>
+      <div className="flex items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            setPaste('');
+            setParseError(null);
+            setEditing(true);
+          }}
+        >
+          Replace
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => onChange(null)}>
+          Clear
+        </Button>
       </div>
     </div>
   );
