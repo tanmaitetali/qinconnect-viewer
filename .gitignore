@@ -1,5 +1,5 @@
 # dependencies
-/node_modules
+node_modules
 /.pnp
 .pnp.js
 .yarn/install-state.gz
@@ -7,11 +7,8 @@
 # testing
 /coverage
 
-# next.js
-/.next/
-/out/
-
-# production
+# build output
+frontend/dist
 /build
 
 # misc
@@ -23,16 +20,18 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# generated runtime config (written by scripts/generate-config.mjs)
+frontend/public/config.json
+
 # local env files
 .env*.local
 .env
-
-# local dashboard settings
-.dashboard/
 
 # vercel
 .vercel
 
 # typescript
 *.tsbuildinfo
-next-env.d.ts
+
+# cdk
+cdk/frontend/cdk.out

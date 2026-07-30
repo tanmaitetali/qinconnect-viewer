@@ -1,0 +1,22 @@
+{
+  "env": "dev",
+  "account": "375998758337",
+  "region": "us-east-1",
+  "appName": "qinconnect-log-viewer",
+  "auth": {
+    "userPoolId": "us-east-1_iInqFSAJd",
+    "userPoolClientId": "1aqq8cksl5oo39npac56i6rt12",
+    "cognitoDomain": "ivr-tester-dev",
+    "oauth": {
+      "scopes": ["openid", "email", "profile"],
+      "redirectSignIn": "https://qinconnect-log-viewer.t12apps.com/",
+      "redirectSignOut": "https://qinconnect-log-viewer.t12apps.com/"
+    }
+  },
+  "domain": {
+    "name": "qinconnect-log-viewer.t12apps.com",
+    "certificateArn": "arn:aws:acm:us-east-1:375998758337:certificate/09e46547-42ac-4d72-a8b6-e1d0ad494772",
+    "hostedZoneId": "Z05340792AUTQLYD14QI3",
+    "hostedZoneName": "t12apps.com"
+  }
+}
