@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
-import type { AwsCredentials, BedrockSettings, DashboardSettings, LogsSettings } from './types';
+import type { AwsCredentials, DashboardSettings, LogsSettings, BedrockSettings } from './types';
 import { DEFAULT_SETTINGS } from './types';
 
 // Credentials are live AWS secrets, so they live in sessionStorage — cleared
@@ -14,19 +14,9 @@ interface StoredCredentials {
   bedrock: AwsCredentials | null;
 }
 
-interface LogsPrefs {
-  region: string;
-  logGroupName: string;
-}
-
-interface BedrockPrefs {
-  region: string;
-  modelId: string;
-}
-
 interface StoredPrefs {
-  logs: LogsPrefs;
-  bedrock: BedrockPrefs;
+  logs: { region: string; logGroupName: string };
+  bedrock: { region: string; modelId: string };
 }
 
 function loadCredentials(): StoredCredentials {
@@ -66,13 +56,29 @@ function buildSettings(creds: StoredCredentials, prefs: StoredPrefs): DashboardS
   };
 }
 
+function persistToStorage(next: DashboardSettings): void {
+  const creds: StoredCredentials = {
+    logs: next.logs.credentials,
+    bedrock: next.bedrock.credentials,
+  };
+  const prefs: StoredPrefs = {
+    logs: { region: next.logs.region, logGroupName: next.logs.logGroupName },
+    bedrock: { region: next.bedrock.region, modelId: next.bedrock.modelId },
+  };
+  sessionStorage.setItem(CREDENTIALS_KEY, JSON.stringify(creds));
+  localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+}
+
 export interface CredentialsContextValue {
   settings: DashboardSettings;
+  /** Save the entire settings object at once. Avoids stale-closure bugs. */
+  saveAll: (next: DashboardSettings) => void;
+  /** Convenience: update only logs settings. */
   setLogsSettings: (next: LogsSettings) => void;
+  /** Convenience: update only bedrock settings. */
   setBedrockSettings: (next: BedrockSettings) => void;
   isLogsConfigured: boolean;
   isBedrockConfigured: boolean;
-  /** Clears stored credentials (both sets) without touching saved preferences. */
   clearCredentials: () => void;
 }
 
@@ -83,48 +89,49 @@ export function CredentialsProvider({ children }: { children: ReactNode }) {
     buildSettings(loadCredentials(), loadPrefs()),
   );
 
-  const persist = useCallback((next: DashboardSettings) => {
-    const creds: StoredCredentials = { logs: next.logs.credentials, bedrock: next.bedrock.credentials };
-    const prefs: StoredPrefs = {
-      logs: { region: next.logs.region, logGroupName: next.logs.logGroupName },
-      bedrock: { region: next.bedrock.region, modelId: next.bedrock.modelId },
-    };
-    sessionStorage.setItem(CREDENTIALS_KEY, JSON.stringify(creds));
-    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+  const saveAll = useCallback((next: DashboardSettings) => {
+    persistToStorage(next);
     setSettings(next);
   }, []);
 
-  const setLogsSettings = useCallback(
-    (next: LogsSettings) => {
-      persist({ ...settings, logs: next });
-    },
-    [settings, persist],
-  );
+  const setLogsSettings = useCallback((next: LogsSettings) => {
+    setSettings((prev) => {
+      const updated = { ...prev, logs: next };
+      persistToStorage(updated);
+      return updated;
+    });
+  }, []);
 
-  const setBedrockSettings = useCallback(
-    (next: BedrockSettings) => {
-      persist({ ...settings, bedrock: next });
-    },
-    [settings, persist],
-  );
+  const setBedrockSettings = useCallback((next: BedrockSettings) => {
+    setSettings((prev) => {
+      const updated = { ...prev, bedrock: next };
+      persistToStorage(updated);
+      return updated;
+    });
+  }, []);
 
   const clearCredentials = useCallback(() => {
-    persist({
-      logs: { ...settings.logs, credentials: null },
-      bedrock: { ...settings.bedrock, credentials: null },
+    setSettings((prev) => {
+      const updated = {
+        logs: { ...prev.logs, credentials: null },
+        bedrock: { ...prev.bedrock, credentials: null },
+      };
+      persistToStorage(updated);
+      return updated;
     });
-  }, [settings, persist]);
+  }, []);
 
   const value = useMemo<CredentialsContextValue>(
     () => ({
       settings,
+      saveAll,
       setLogsSettings,
       setBedrockSettings,
       isLogsConfigured: Boolean(settings.logs.credentials && settings.logs.logGroupName.trim()),
       isBedrockConfigured: Boolean(settings.bedrock.credentials),
       clearCredentials,
     }),
-    [settings, setLogsSettings, setBedrockSettings, clearCredentials],
+    [settings, saveAll, setLogsSettings, setBedrockSettings, clearCredentials],
   );
 
   return <CredentialsContext.Provider value={value}>{children}</CredentialsContext.Provider>;

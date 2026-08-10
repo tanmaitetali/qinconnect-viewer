@@ -33,5 +33,12 @@ frontend/public/config.json
 # typescript
 *.tsbuildinfo
 
+# legacy Next.js artifacts (migrated to Vite SPA)
+.next
+next-env.d.ts
+
+# local dev config
+config/local.json
+
 # cdk
 cdk/frontend/cdk.out

@@ -326,13 +326,13 @@ export function HomePage() {
             {/* Conversation Timeline */}
             <div className="flex-1 flex flex-col overflow-hidden">
               <div className="flex items-center justify-between px-4 py-2 border-b border-dark-800 bg-dark-900/50">
-                <div className="text-xs text-dark-400 flex items-center">
+                <div className="text-xs text-dark-400 flex items-center flex-wrap gap-y-1 min-w-0">
                   <button
                     onClick={() => void handleCopySessionId(selectedSession.sessionId)}
                     className="flex items-center gap-1 font-mono hover:text-dark-200 transition-colors"
                     title="Copy session ID"
                   >
-                    Session: {selectedSession.sessionId.slice(0, 12)}…
+                    Session: {selectedSession.sessionId}
                     {copiedSessionId ? (
                       <svg className="w-3 h-3 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
@@ -350,13 +350,12 @@ export function HomePage() {
                   </button>
                   {selectedSession.contactId && selectedSession.contactId !== selectedSession.sessionId && (
                     <>
-                      <span className="mx-2">·</span>
                       <button
                         onClick={() => void handleCopyContactId(selectedSession.contactId)}
                         className="flex items-center gap-1 font-mono hover:text-dark-200 transition-colors"
                         title="Copy contact ID"
                       >
-                        Contact: {selectedSession.contactId.slice(0, 12)}…
+                        Contact: {selectedSession.contactId}
                         {copiedContactId ? (
                           <svg className="w-3 h-3 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />

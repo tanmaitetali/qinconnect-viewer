@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card';
 import { CheckCircle2, XCircle, Loader2, FolderSearch, BrainCircuit, ScrollText } from 'lucide-react';
@@ -9,7 +10,7 @@ import { discoverLogGroups } from '../lib/cloudwatch';
 import { analyzeSession } from '../lib/bedrock';
 
 export function SettingsPage() {
-  const { settings, setLogsSettings, setBedrockSettings } = useCredentials();
+  const { settings, saveAll } = useCredentials();
 
   const [logsCreds, setLogsCreds] = useState<AwsCredentials | null>(settings.logs.credentials);
   const [logsRegion, setLogsRegion] = useState(settings.logs.region);
@@ -28,20 +29,21 @@ export function SettingsPage() {
   } | null>(null);
   const [logGroups, setLogGroups] = useState<string[]>([]);
 
-  const handleSave = () => {
-    setLogsSettings({
-      credentials: logsCreds,
-      region: logsRegion,
-      logGroupName,
-    });
-    setBedrockSettings({
-      credentials: bedrockCreds,
-      region: bedrockRegion,
-      modelId,
+  // Auto-save: persist settings whenever any value changes (skip initial mount)
+  const isInitialMount = useRef(true);
+  useEffect(() => {
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
+    saveAll({
+      logs: { credentials: logsCreds, region: logsRegion, logGroupName },
+      bedrock: { credentials: bedrockCreds, region: bedrockRegion, modelId },
     });
     setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
-  };
+    const timer = setTimeout(() => setSaved(false), 1500);
+    return () => clearTimeout(timer);
+  }, [logsCreds, logsRegion, logGroupName, bedrockCreds, bedrockRegion, modelId, saveAll]);
 
   const handleTestLogs = async () => {
     const credentials = logsCreds;
@@ -197,16 +199,16 @@ export function SettingsPage() {
           </CardContent>
         </Card>
 
-        {/* Configure AI (Bedrock) */}
+        {/* Configure AI (Bedrock) — optional */}
         <Card>
           <CardHeader>
             <div className="flex items-center gap-2">
               <BrainCircuit className="h-5 w-5 text-purple-400" />
-              <CardTitle className="text-base">Configure AI</CardTitle>
+              <CardTitle className="text-base">Configure AI <span className="text-xs font-normal text-dark-500">(optional)</span></CardTitle>
             </div>
             <CardDescription>
-              AWS credentials for Bedrock model invocation (AI session analysis). Can use different
-              credentials than bot logs.
+              Optional. Configure Bedrock credentials to enable AI-powered session analysis.
+              Can use different credentials than bot logs.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -247,7 +249,10 @@ export function SettingsPage() {
         </Card>
 
         <div className="flex items-center gap-3">
-          <Button onClick={handleSave}>{saved ? 'Saved!' : 'Save Settings'}</Button>
+          <Link to="/">
+            <Button>{saved ? 'Saved!' : 'Save Settings'}</Button>
+          </Link>
+          <p className="text-xs text-dark-500">Settings auto-save when you make changes.</p>
         </div>
       </div>
     </div>
@@ -309,6 +314,12 @@ function CredentialPaste({
           id={`${idPrefix}-paste`}
           value={paste}
           onChange={(e) => setPaste(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey && paste.trim()) {
+              e.preventDefault();
+              handleSave();
+            }
+          }}
           placeholder={PASTE_PLACEHOLDER}
           rows={8}
           autoComplete="off"
